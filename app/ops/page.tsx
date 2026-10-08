@@ -13,13 +13,23 @@ export const metadata: Metadata = {
   title: "Ops",
 };
 
-type MintRequestRow = {
+type MintRequestRecord = {
   id: string;
   amount: number | string;
   destination_address: string;
   status: string;
   created_at: string;
+  tx_hash: string | null;
+  match_type: string | null;
+  overridden_by: string | null;
+  override_reason: string | null;
   client: { name: string } | null;
+  matched_txn: {
+    amount: number | string;
+    counterparty_name: string;
+    value_date: string;
+    settled: boolean;
+  } | null;
 };
 
 type BankTransactionRow = {
@@ -55,10 +65,15 @@ export default async function OpsPage() {
     supabase
       .from("mint_requests")
       .select(
-        "id, amount, destination_address, status, created_at, client:clients(name)",
+        // Two FKs link these tables (one each way); the hint picks
+        // mint_requests.matched_bank_txn_id.
+        "id, amount, destination_address, status, created_at, tx_hash, " +
+          "match_type, overridden_by, override_reason, client:clients(name), " +
+          "matched_txn:bank_transactions!mint_requests_matched_bank_txn_id_fkey" +
+          "(amount, counterparty_name, value_date, settled)",
       )
       .order("created_at", { ascending: false })
-      .overrideTypes<MintRequestRow[], { merge: false }>(),
+      .overrideTypes<MintRequestRecord[], { merge: false }>(),
     supabase
       .from("bank_transactions")
       .select(
@@ -132,6 +147,16 @@ export default async function OpsPage() {
                       destinationAddress: row.destination_address,
                       status: row.status,
                       createdAt: formatTimestamp(row.created_at),
+                      txHash: row.tx_hash,
+                      matchType: row.match_type,
+                      overriddenBy: row.overridden_by,
+                      overrideReason: row.override_reason,
+                      matchedTxn: row.matched_txn && {
+                        counterpartyName: row.matched_txn.counterparty_name,
+                        amount: String(row.matched_txn.amount),
+                        valueDate: row.matched_txn.value_date,
+                        settled: row.matched_txn.settled,
+                      },
                     }}
                     matchable={matchable}
                     matchableError={matchableTransactions.error?.message}

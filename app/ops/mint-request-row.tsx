@@ -2,7 +2,12 @@
 
 import { useActionState, useState } from "react";
 
-import { matchMintRequest, type MatchFormState } from "./actions";
+import {
+  approveMintRequest,
+  matchMintRequest,
+  type ApproveFormState,
+  type MatchFormState,
+} from "./actions";
 
 export type MintRequestView = {
   id: string;
@@ -11,6 +16,16 @@ export type MintRequestView = {
   destinationAddress: string;
   status: string;
   createdAt: string;
+  txHash: string | null;
+  matchType: string | null;
+  overriddenBy: string | null;
+  overrideReason: string | null;
+  matchedTxn: {
+    counterpartyName: string;
+    amount: string;
+    valueDate: string;
+    settled: boolean;
+  } | null;
 };
 
 export type MatchableBankTransaction = {
@@ -21,6 +36,7 @@ export type MatchableBankTransaction = {
 };
 
 const initialState: MatchFormState = { status: "idle" };
+const initialApproveState: ApproveFormState = { status: "idle" };
 
 const COLUMN_COUNT = 6;
 
@@ -37,7 +53,18 @@ export function MintRequestRow({
   matchableError?: string;
 }) {
   const [open, setOpen] = useState(false);
+  // Held here, not in ApproveForm: a failure after approval moves the request
+  // out of funds_matched, which unmounts the form — the message must survive.
+  const [approveState, approveAction, approvePending] = useActionState(
+    approveMintRequest,
+    initialApproveState,
+  );
+
   const canMatch = request.status === "submitted";
+  const canApprove = request.status === "funds_matched";
+  const actionLabel = canMatch ? "Match" : canApprove ? "Approve" : null;
+  const approveFailedAfterApproval =
+    !canApprove && approveState.status === "error";
 
   return (
     <>
@@ -49,38 +76,150 @@ export function MintRequestRow({
         <td className="px-4 py-2 font-mono text-xs">
           {request.destinationAddress}
         </td>
-        <td className="px-4 py-2">{request.status}</td>
+        <td className="px-4 py-2">
+          {request.status}
+          {request.txHash && (
+            <div
+              className="max-w-40 truncate font-mono text-xs text-neutral-500"
+              title={request.txHash}
+            >
+              {request.txHash}
+            </div>
+          )}
+        </td>
         <td className="px-4 py-2 whitespace-nowrap">{request.createdAt}</td>
         <td className="px-4 py-2 text-right">
-          {canMatch && (
+          {actionLabel && (
             <button
               type="button"
               onClick={() => setOpen((o) => !o)}
               aria-expanded={open}
               className="rounded border border-neutral-300 px-3 py-1 text-sm font-medium dark:border-neutral-700"
             >
-              {open ? "Cancel" : "Match"}
+              {open ? "Cancel" : actionLabel}
             </button>
           )}
         </td>
       </tr>
-      {canMatch && open && (
+      {((open && actionLabel) || approveFailedAfterApproval) && (
         <tr>
           <td
             colSpan={COLUMN_COUNT}
             className="bg-neutral-50 px-4 py-4 dark:bg-neutral-900"
           >
-            {matchableError ? (
+            {canMatch &&
+              (matchableError ? (
+                <p className="text-sm text-red-700 dark:text-red-400">
+                  Failed to load bank transactions: {matchableError}
+                </p>
+              ) : (
+                <MatchForm request={request} matchable={matchable} />
+              ))}
+            {canApprove && (
+              <ApproveForm
+                request={request}
+                state={approveState}
+                action={approveAction}
+                pending={approvePending}
+              />
+            )}
+            {approveFailedAfterApproval && (
               <p className="text-sm text-red-700 dark:text-red-400">
-                Failed to load bank transactions: {matchableError}
+                {approveState.message}
               </p>
-            ) : (
-              <MatchForm request={request} matchable={matchable} />
             )}
           </td>
         </tr>
       )}
     </>
+  );
+}
+
+function ApproveForm({
+  request,
+  state,
+  action,
+  pending,
+}: {
+  request: MintRequestView;
+  state: ApproveFormState;
+  action: (formData: FormData) => void;
+  pending: boolean;
+}) {
+  const values = state.status === "error" ? state.values : undefined;
+  const txn = request.matchedTxn;
+
+  return (
+    <form action={action} className="space-y-4">
+      <input type="hidden" name="mint_request_id" value={request.id} />
+
+      {/* What the approver is signing off on. */}
+      <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm">
+        <dt className="text-neutral-600 dark:text-neutral-400">Mint</dt>
+        <dd>
+          <span className="font-mono">{request.amount}</span> to{" "}
+          <span className="font-mono text-xs">
+            {request.destinationAddress}
+          </span>
+        </dd>
+
+        <dt className="text-neutral-600 dark:text-neutral-400">Funds</dt>
+        <dd>
+          {txn ? (
+            <>
+              <span className="font-mono">{txn.amount}</span> from{" "}
+              {txn.counterpartyName}, value date {txn.valueDate},{" "}
+              {txn.settled ? "settled" : "not settled"}
+              {txn.amount !== request.amount && (
+                <span className="ml-2 text-xs text-amber-700 dark:text-amber-400">
+                  amount differs from request
+                </span>
+              )}
+            </>
+          ) : (
+            "—"
+          )}
+        </dd>
+
+        <dt className="text-neutral-600 dark:text-neutral-400">Match</dt>
+        <dd>
+          {request.matchType === "manual_override"
+            ? `Manual, by ${request.overriddenBy}: ${request.overrideReason}`
+            : request.matchType === "auto"
+              ? "Automatic"
+              : "—"}
+        </dd>
+      </dl>
+
+      <div className="flex flex-wrap items-end gap-4">
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-neutral-600 dark:text-neutral-400">
+            Approver name
+          </span>
+          <input
+            name="approver"
+            type="text"
+            required
+            defaultValue={values?.approver ?? ""}
+            className={`${inputClass} w-56`}
+          />
+        </label>
+
+        <button
+          type="submit"
+          disabled={pending}
+          className="rounded bg-neutral-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
+        >
+          {pending ? "Approving and minting…" : "Approve and mint"}
+        </button>
+      </div>
+
+      {state.status === "error" && (
+        <p className="text-sm text-red-700 dark:text-red-400">
+          {state.message}
+        </p>
+      )}
+    </form>
   );
 }
 
